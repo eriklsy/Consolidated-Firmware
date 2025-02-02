@@ -10,5 +10,10 @@
     "AHRS": 2,
     "VELOCITY": 3,
     "POSITION": 4
+  },
+  "TVInteralStates":{
+    "OFF": 0,
+    "TRACTION_CONTROL": 1,
+    "ACTIVE_DIFF": 2
   }
 }
