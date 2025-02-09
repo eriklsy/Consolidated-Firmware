@@ -320,63 +320,20 @@
             }
         }
     },
-    "PowerEstimate": {
+    "PowerConsumed": {
         "msg_id": 211,
         "cycle_time": 1000,
         "description": "Debug Power Messages",
         "signals": {
-            "PowerEstimateValue": {
+            "PowerConsumedIdeal": {
                 "min": 0,
                 "max": 120,
                 "resolution": 0.1
             },
-            "PowerEstimateMeasuredValue": {
+            "PowerConsumedMeasuredValue": {
                 "min": 0,
                 "max": 120,
                 "resolution": 0.1
-            }
-        }
-    },
-    "PowerEstimatePID": {
-        "msg_id": 212,
-        "cycle_time": 1000,
-        "description": "Debug messages for the PID power estimate controller",
-        "signals": {
-            "PIDPowerEstimateOutput": {
-                "start_bit": 0,
-                "bits": 8,
-                "offset": 0,
-                "signed": true,
-                "min": -1,
-                "max": 1,
-                "scale": 0.01
-            },
-            "PIDPowerEstimateError": {
-                "start_bit": 8,
-                "bits": 16,
-                "offset": 0,
-                "signed": true,
-                "min": -80,
-                "max": 80,
-                "scale": 0.1
-            },
-            "PIDPowerEstimateDerivative": {
-                "start_bit": 24,
-                "bits": 16,
-                "offset": 0,
-                "signed": true,
-                "min": -160,
-                "max": 160,
-                "scale": 0.1
-            },
-            "PIDPowerEstimateIntegral": {
-                "start_bit": 40,
-                "bits": 24,
-                "offset": 0,
-                "signed": true,
-                "min": -21474836,
-                "max": 21474836,
-                "scale": 0.1
             }
         }
     },
@@ -448,7 +405,7 @@
     },
     "ActiveDiffOutputs": {
         "msg_id": 215,
-        "cycle_time": 1000,
+        "cycle_time": 10,
         "description": "Debug Messages for the Active Differential component of Torque Vectoring",
         "signals": {
             "ActiveDiffTorqueLeft": {
@@ -457,6 +414,23 @@
                 "resolution": 0.1
             },
             "ActiveDiffTorqueRight": {
+                "min": 0,
+                "max": 100,
+                "resolution": 0.1
+            }
+        }
+    },
+    "TractionControl": {
+        "msg_id": 231,
+        "cycle_time": 10,
+        "description": "Debug Messages for the Traction Control component of Torque Vectoring",
+        "signals": {
+            "TractionControlTorqueLeft": {
+                "min": 0,
+                "max": 100,
+                "resolution": 0.1
+            },
+            "TractionControlTorqueRight": {
                 "min": 0,
                 "max": 100,
                 "resolution": 0.1
@@ -482,7 +456,7 @@
     },
     "VehicleDynamics": {
         "msg_id": 226,
-        "cycle_time": 100,
+        "cycle_time": 10,
         "description": "Vehicle dynamics info",
         "signals": {
             "RegenEnabled": {
@@ -502,6 +476,9 @@
                 "min": -150,
                 "max": 150,
                 "unit": "km/h"
+            },
+            "TVState":{
+                "enum": "TorqueVectoringStates"
             }
         }
     },
@@ -792,16 +769,6 @@
                 "max": 1,
                 "resolution": 0.01,
                 "unit": "%"
-            }
-        }
-    },
-    "TorqueVectoringStateMachine":{
-        "msg_id":231,
-        "cycle_time": 100, 
-        "description": "Torque vectoring internal state info",
-        "signals":{
-            "TVInternalState":{
-                "enum": "TVInteralStates"
             }
         }
     }
