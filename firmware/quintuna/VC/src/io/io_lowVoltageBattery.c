@@ -23,6 +23,10 @@ const uint16_t STACK_VOLTAGE_COMMAND = 0x3534;
 #define SECONDS_PER_HOUR        3600.0f  // Convert charge from Coulombs to mAh
 #define PERCENTAGE_FACTOR       100.0f   // Convert SOC to percentage
 #define ADC_CALIBRATION_FACTOR  7.4768f  // Derived from ADC gain and scaling
+#define ALERT_PIN_CONFIG        0x56 
+#define ALARM_ENABLE_REG        0x66  
+#define ALARM_STATUS_REG        0x62  
+#define ALARM_CLEAR_CMD         0x01  
 
 extern I2C_HandleTypeDef hi2c1; // Declaration of i2c bus
 static I2cInterface lvBatMon = { &hi2c1, BQ76922_I2C_ADDR, 100 };
@@ -46,6 +50,8 @@ bool io_lowVoltageBattery_writeSubcommand(uint16_t subcommand)
     {
         return false;
     }
+
+    osDelay(0.66); // Delay until charge data is ready to be read
 
     return true;
 }
@@ -77,6 +83,7 @@ float io_lowVoltageBattery_readSOC()
     uint32_t charge;
     uint16_t time;
 
+    
     uint8_t responseLen = io_lowVoltageBattery_readResponseLength();
 
     if (responseLen != 6)
@@ -115,6 +122,8 @@ float io_lowVoltageBattery_readSOC()
     float CC_GAIN    = ADC_CALIBRATION_FACTOR / R_SENSE;
     float charge_mAh = (charge * CC_GAIN) / SECONDS_PER_HOUR;
 
+    hw_i2c_memWrite(&hi2c1, ALARM_STATUS_REG, ALARM_CLEAR_CMD); // Clear ALERT
+
     return (charge_mAh / Q_FULL) * PERCENTAGE_FACTOR;
 }
 
@@ -131,6 +140,20 @@ bool io_lowVoltageBattery_init()
         return false;
     }
 
+    uint8_t alert_config = hw_i2c_memRead(&hi2c1, ALERT_PIN_CONFIG); // Read the existing ALERT pin config
+
+    // Set OPT[5] (the 5th bit) = 1 (Active Low) while preserving other settings
+    alert_config |= (1 << 5);  // Set bit 5
+
+    hw_i2c_memWrite(&hi2c1, ALERT_PIN_CONFIG, alert_config); // Write back the updated configuration
+
+    hw_i2c_memWrite(&hi2c1, ALERT_PIN_CONFIG, 0x02); // Configure ALERT pin as an interrupt output
+
+    hw_i2c_memWrite(&hi2c1, ALARM_ENABLE_REG, 0x82); // Enable ADC scan alerts
+
+    /**
+     * Note: OTP can be configured to reduce processing bandwidth at init time
+     */
     return true;
 }
 
@@ -141,12 +164,12 @@ bool io_lowVoltageBattery_init()
  */
 float io_lowVoltageBattery_getSOC()
 {
+    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
+
     if (!io_lowVoltageBattery_writeSubcommand(CMD_DASTATUS6))
     {
         return -1;
     }
-
-    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
 
     return io_lowVoltageBattery_readSOC();
 }
