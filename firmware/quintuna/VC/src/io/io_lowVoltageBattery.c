@@ -51,7 +51,16 @@ bool io_lowVoltageBattery_writeSubcommand(uint16_t subcommand)
         return false;
     }
 
-    osDelay(0.66); // Delay until charge data is ready to be read
+    osDelay(0.65); // Delay until charge/voltage data should be ready to be read
+
+    uint8_t low;
+    uint8_t high;
+    while ((low | (high << 8)) == subcommand) // Delay until charge/voltage data is actually ready to be read
+    {
+        osDelay(0.01);
+        low = hw_i2c_memRead(&hi2c1, REG_SUBCOMMAND_LSB);
+        high = hw_i2c_memRead(&hi2c1, REG_SUBCOMMAND_MSB);
+    }
 
     return true;
 }
@@ -83,7 +92,6 @@ float io_lowVoltageBattery_readSOC()
     uint32_t charge;
     uint16_t time;
 
-    
     uint8_t responseLen = io_lowVoltageBattery_readResponseLength();
 
     if (responseLen != 6)
@@ -125,6 +133,52 @@ float io_lowVoltageBattery_readSOC()
     hw_i2c_memWrite(&hi2c1, ALARM_STATUS_REG, ALARM_CLEAR_CMD); // Clear ALERT
 
     return (charge_mAh / Q_FULL) * PERCENTAGE_FACTOR;
+}
+
+/**
+ * Helper function to read the coltage of the LV battery from BQ76922
+ * 
+ * @return the voltage as a float
+ */
+uint16_t io_lowVoltageBattery_readVoltage(uint16_t volt_cmd)
+{
+    uint16_t voltage;
+
+    uint8_t responseLen = io_lowVoltageBattery_readResponseLength();
+
+    if (responseLen != 2)
+    {
+        return -1;
+    }
+
+    uint8_t buffer[2];
+
+    if (!hw_i2c_memRead(&hi2c1, REG_DATA_BUFFER, buffer, 2))
+    {
+        return -1;
+    }
+
+    uint8_t checksum;
+    if (!hw_i2c_memRead(&hi2c1, REG_CHECKSUM, &checksum, 1))
+    {
+        return -1;
+    }
+
+    uint8_t calculated_checksum = (volt_cmd & 0xFF) + (volt_cmd >> 8) + responseLen;
+    for (int i = 0; i < responseLen; i++)
+    {
+        calculated_checksum += buffer[i];
+    }
+    calculated_checksum = ~calculated_checksum; // Invert bits
+
+    if (calculated_checksum != checksum)
+    {
+        return -1;
+    }
+
+    voltage = (buffer[0] | (buffer[1] << 8);
+
+    return voltage;
 }
 
 /**
@@ -172,4 +226,21 @@ float io_lowVoltageBattery_getSOC()
     }
 
     return io_lowVoltageBattery_readSOC();
+}
+
+/**
+ * Main driver function to execute i2c communication protocol to get the battery voltage
+ * 
+ * @return the voltage
+ */
+uint16_t io_lowVoltageBattery_getVoltage(uint16_t voltage_cmd)
+{
+    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
+
+    if (!io_lowVoltageBattery_writeSubcommand(voltage_cmd))
+    {
+        return -1;
+    }
+
+    return io_lowVoltageBattery_readVoltage(voltage_cmd);
 }
