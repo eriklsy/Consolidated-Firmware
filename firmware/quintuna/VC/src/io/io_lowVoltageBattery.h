@@ -5,16 +5,32 @@
 
 extern osSemaphoreId_t bat_mtr_sem;
 
+const uint16_t ACCUMULATED_CHARGE_COMMAND    = 0x0076;
+const uint16_t CELL0_VOLTAGE_COMMAND = 0x1514;
+const uint16_t CELL1_VOLTAGE_COMMAND = 0x1716;
+const uint16_t CELL2_VOLTAGE_COMMAND = 0x1B1A;
+const uint16_t CELL4_VOLTAGE_COMMAND = 0x1D1C;
+const uint16_t STACK_VOLTAGE_COMMAND = 0x3534;
+
 /**
- * Initialize the LV battery monitor.
- * 
- * @return true if semaphore init is sucessful and false otherwise
+ * @brief Initializes the low-voltage battery monitoring system.
+ *
+ * @return true if initialization was successful; false otherwise.
  */
 bool io_lowVoltageBattery_init();
 
 /**
- * Gets state of charge (SOC) from low voltage battery
- * 
- * @return the SOC of the battery as a percentage
+ * @brief Gets the battery state-of-charge (SOC) as a percentage.
+ *
+ * @return SOC percentage on success, or -1.0f on error.
  */
-float io_lowVoltageBattery_getSOC();
+float io_lowVoltageBattery_get_SOC();
+
+/**
+ * @brief Gets the battery voltage.
+ *
+ * @param voltage_cmd The subcommand used to read the voltage.
+ *
+ * @return The battery voltage on success, or -1 on error.
+ */
+uint16_t io_lowVoltageBattery_get_voltage(uint16_t voltage_cmd);

@@ -4,243 +4,206 @@
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
 
-const uint8_t  BQ76922_I2C_ADDR      = 0x10;   // 7-bit I2C address
-const uint16_t CMD_DASTATUS6         = 0x0076; // Subcommand for accumulated charge
-const uint8_t  COMMAND_ADDRESS       = 0x3E;
-const uint8_t  REG_SUBCOMMAND_LSB    = 0x3E;
-const uint8_t  REG_SUBCOMMAND_MSB    = 0x3F;
-const uint8_t  REG_DATA_BUFFER       = 0x40;
-const uint8_t  REG_CHECKSUM          = 0x60;
-const uint8_t  REG_RESPONSE_LENGTH   = 0x61;
-const uint16_t CELL0_VOLTAGE_COMMAND = 0x1514;
-const uint16_t CELL1_VOLTAGE_COMMAND = 0x1716;
-const uint16_t CELL2_VOLTAGE_COMMAND = 0x1B1A;
-const uint16_t CELL4_VOLTAGE_COMMAND = 0x1D1C;
-const uint16_t STACK_VOLTAGE_COMMAND = 0x3534;
+/* Register Addresses */
+static const uint8_t  BQ76922_I2C_ADDR        = 0x10; 
+static const uint8_t  REG_SUBCOMMAND_LSB      = 0x3E;
+static const uint8_t  REG_SUBCOMMAND_MSB      = 0x3F;
+static const uint8_t  REG_DATA_BUFFER         = 0x40;
+static const uint8_t  REG_CHECKSUM            = 0x60;
+static const uint8_t  REG_RESPONSE_LENGTH     = 0x61;
+static const uint8_t  ALERT_PIN_CONFIG        = 0x56; 
+static const uint8_t  ALARM_ENABLE_REG        = 0x66;  
+static const uint8_t  ALARM_STATUS_REG        = 0x62;  
 
-#define R_SENSE                 2.0f     // Sense resistor in mΩ
-#define Q_FULL                  11200.0f // Battery full charge capacity in mAh
-#define SECONDS_PER_HOUR        3600.0f  // Convert charge from Coulombs to mAh
-#define PERCENTAGE_FACTOR       100.0f   // Convert SOC to percentage
-#define ADC_CALIBRATION_FACTOR  7.4768f  // Derived from ADC gain and scaling
-#define ALERT_PIN_CONFIG        0x56 
-#define ALARM_ENABLE_REG        0x66  
-#define ALARM_STATUS_REG        0x62  
-#define ALARM_CLEAR_CMD         0x01  
+/* Voltage Commands */
+static const uint16_t CELL0_VOLTAGE_COMMAND   = 0x1514;
+static const uint16_t CELL1_VOLTAGE_COMMAND   = 0x1716;
+static const uint16_t CELL2_VOLTAGE_COMMAND   = 0x1B1A;
+static const uint16_t CELL4_VOLTAGE_COMMAND   = 0x1D1C;
+static const uint16_t STACK_VOLTAGE_COMMAND   = 0x3534;
 
-extern I2C_HandleTypeDef hi2c1; // Declaration of i2c bus
-static I2cInterface lvBatMon = { &hi2c1, BQ76922_I2C_ADDR, 100 };
+/* Charge Command */
 
-osSemaphoreId_t bat_mtr_sem; // Declaration of interrupt handling semaphore
+static const uint16_t ACCUMULATED_CHARGE_COMMAND  = 0x0076;   // Subcommand for accumulated charge
+
+/* Hardware Configuration and Conversion Factors */
+static const float    R_SENSE                 = 2.0f;     // Sense resistor in mΩ
+static const float    Q_FULL                  = 11200.0f; // Battery full charge capacity in mAh
+static const float    SECONDS_PER_HOUR        = 3600.0f;  // Seconds per hour (for charge conversion)
+static const float    PERCENTAGE_FACTOR       = 100.0f;   // To convert SOC to percentage
+static const float    ADC_CALIBRATION_FACTOR  = 7.4768f;  // Derived from ADC gain and scaling
+
+/* Alarm and Alert Settings */
+static const uint8_t  ALARM_CLEAR_CMD         = 0x01;
+static const uint8_t  ALERT_ACTIVE_LOW_BIT    = 5;        // Bit position for active-low configuration
+static const uint8_t  ALERT_PIN_INTERRUPT_CONFIG = 0x02;   // ALERT pin configured as an interrupt output
+static const uint8_t  ALARM_ENABLE_VALUE      = 0x82;     // Enable ADC scan alerts
+
+/* I2C Transaction Parameters */
+static const uint32_t I2C_TIMEOUT_MS          = 100;      // Timeout for I2C operations
+
+/* Response Sizes */
+static const uint8_t  CMD_SUBCOMMAND_SIZE     = 2;        // Two bytes for subcommand
+static const uint8_t  RESPONSE_LENGTH_SIZE    = 1;        // One byte for response length and checksum
+static const uint8_t  SOC_RESPONSE_LENGTH     = 6;        // Expected response size for SOC command
+static const uint8_t  VOLTAGE_RESPONSE_LENGTH = 2;        // Expected response size for voltage command
+
+/* Bit Mask and Shifting Constants */
+static const uint8_t  BYTE_MASK               = 0xFF;     // 8-bit mask for lower byte extraction
+static const uint8_t  BYTE_SHIFT              = 8;        // Shift amount for upper byte extraction
+
+/* Delay Constants (in OS ticks) */
+static const TickType_t SUBCOMMAND_PROCESS_DELAY_MS = 1;  // Delay after issuing a subcommand
+static const TickType_t POLL_DELAY_MS               = 1;  // Delay between polls
+
+extern I2C_HandleTypeDef hi2c1;
+
+static I2cInterface lvBatMon = { &hi2c1, BQ76922_I2C_ADDR, I2C_TIMEOUT_MS };
+
+osSemaphoreId_t bat_mtr_sem;
 
 /**
- * Helper function to write commands to communicate with BQ76922 over i2c
- * 
- * @param subcommand in 2 byte hexadecimal
- * @return true if the command was sucessfully written and false otherwise
+ * @brief Sends a subcommand to the BQ76922 and waits until the device’s
+ *        subcommand register clears (indicating that the response is ready).
+ *
+ * @param cmd The 16-bit subcommand to send.
+ * @return true if the subcommand was sent and the response is ready; false otherwise.
  */
-bool io_lowVoltageBattery_writeSubcommand(uint16_t subcommand)
+static bool io_lowVoltageBattery_send_subcommand(uint16_t cmd)
 {
-    if (!hw_i2c_isTargetReady(&lvBatMon)){
+    if (!hw_i2c_isTargetReady(&lvBatMon))
         return false;
-    }
-    
-    uint8_t data[2] = { subcommand & 0xFF, (subcommand >> 8) & 0xFF };
-    if (!hw_i2c_memWrite(&hi2c1, REG_SUBCOMMAND_LSB, data, 2))
-    {
+
+    uint8_t data[CMD_SUBCOMMAND_SIZE] = { 
+        (uint8_t)(cmd & BYTE_MASK), 
+        (uint8_t)((cmd >> BYTE_SHIFT) & BYTE_MASK) 
+    };
+
+    if (!hw_i2c_memWrite(&lvBatMon, REG_SUBCOMMAND_LSB, data, CMD_SUBCOMMAND_SIZE))
         return false;
-    }
 
-    osDelay(0.65); // Delay until charge/voltage data should be ready to be read
+    /* Wait for the subcommand to be processed */
+    osDelay(SUBCOMMAND_PROCESS_DELAY_MS);
 
-    uint8_t low;
-    uint8_t high;
-    while ((low | (high << 8)) == subcommand) // Delay until charge/voltage data is actually ready to be read
-    {
-        osDelay(0.01);
-        low = hw_i2c_memRead(&hi2c1, REG_SUBCOMMAND_LSB);
-        high = hw_i2c_memRead(&hi2c1, REG_SUBCOMMAND_MSB);
-    }
+    uint8_t low = 0, high = 0;
+    do {
+        osDelay(POLL_DELAY_MS);
+        low  = hw_i2c_memRead(&lvBatMon, REG_SUBCOMMAND_LSB);
+        high = hw_i2c_memRead(&lvBatMon, REG_SUBCOMMAND_MSB);
+    } while ((low | (high << BYTE_SHIFT)) == cmd);
 
     return true;
 }
 
 /**
- * Helper function to read the length of a response from BQ76922 in bytes
- * 
- * @return the number of bytes contained within a response
+ * @brief Reads the response from the BQ76922 and validates the checksum.
+ *
+ * @param cmd         The subcommand that was sent.
+ * @param expectedLen The expected number of data bytes.
+ * @param buffer      Pointer to a buffer (of at least expectedLen bytes) where the data will be stored.
+ *
+ * @return true if the response was successfully read and the checksum is valid; false otherwise.
  */
-uint8_t io_lowVoltageBattery_readResponseLength()
+static bool io_lowVoltageBattery_read_response(uint16_t cmd, uint8_t expectedLen, uint8_t *buffer)
 {
-    uint8_t responseLength;
+    uint8_t respLen;
+    if (!hw_i2c_memRead(&lvBatMon, REG_RESPONSE_LENGTH, &respLen, RESPONSE_LENGTH_SIZE))
+        return false;
+    if (respLen != expectedLen)
+        return false;
 
-    if (!hw_i2c_memRead(&lvBatMon, REG_RESPONSE_LENGTH, &responseLength, sizeof(responseLength)))
-    {
-        return -1;
-    }
+    if (!hw_i2c_memRead(&lvBatMon, REG_DATA_BUFFER, buffer, expectedLen))
+        return false;
 
-    return responseLength;
+    uint8_t checksum;
+    if (!hw_i2c_memRead(&lvBatMon, REG_CHECKSUM, &checksum, RESPONSE_LENGTH_SIZE))
+        return false;
+
+    uint8_t calcChecksum = (uint8_t)(cmd & BYTE_MASK) + (uint8_t)((cmd >> BYTE_SHIFT) & BYTE_MASK) + respLen;
+    for (uint8_t i = 0; i < expectedLen; i++)
+        calcChecksum += buffer[i];
+    calcChecksum = ~calcChecksum;  // Invert bits
+
+    return (calcChecksum == checksum);
 }
 
 /**
- * Helper function to read the state-of-charge (SOC) of the LV battery from BQ76922
- * 
- * @return the SOC as a percentage of full charge
+ * @brief Initializes the low-voltage battery monitoring system.
+ *
+ * @return true if initialization was successful; false otherwise.
  */
-float io_lowVoltageBattery_readSOC()
+bool io_lowVoltageBattery_init(void)
 {
-    uint32_t charge;
-    uint16_t time;
+    bat_mtr_sem = osSemaphoreNew(1, 0, NULL);
+    if (bat_mtr_sem == NULL)
+        return false;
 
-    uint8_t responseLen = io_lowVoltageBattery_readResponseLength();
+    uint8_t alert_config;
+    if (!hw_i2c_memRead(&lvBatMon, ALERT_PIN_CONFIG, &alert_config, RESPONSE_LENGTH_SIZE))
+        return false;
 
-    if (responseLen != 6)
-    {
-        return -1;
-    }
+    /* Set the active-low bit while preserving other bits */
+    alert_config |= (1 << ALERT_ACTIVE_LOW_BIT);
+    if (!hw_i2c_memWrite(&lvBatMon, ALERT_PIN_CONFIG, &alert_config, RESPONSE_LENGTH_SIZE))
+        return false;
 
-    uint8_t buffer[6];
+    /* Configure ALERT pin as an interrupt output */
+    if (!hw_i2c_memWrite(&lvBatMon, ALERT_PIN_CONFIG, (uint8_t[]){ ALERT_PIN_INTERRUPT_CONFIG }, RESPONSE_LENGTH_SIZE))
+        return false;
 
-    if (!hw_i2c_memRead(&hi2c1, REG_DATA_BUFFER, buffer, 6))
-    {
-        return -1;
-    }
+    /* Enable ADC scan alerts */
+    if (!hw_i2c_memWrite(&lvBatMon, ALARM_ENABLE_REG, (uint8_t[]){ ALARM_ENABLE_VALUE }, RESPONSE_LENGTH_SIZE))
+        return false;
 
-    uint8_t checksum;
-    if (!hw_i2c_memRead(&hi2c1, REG_CHECKSUM, &checksum, 1))
-    {
-        return -1;
-    }
+    return true;
+}
 
-    uint8_t calculated_checksum = (CMD_DASTATUS6 & 0xFF) + (CMD_DASTATUS6 >> 8) + responseLen;
-    for (int i = 0; i < responseLen; i++)
-    {
-        calculated_checksum += buffer[i];
-    }
-    calculated_checksum = ~calculated_checksum; // Invert bits
+/**
+ * @brief Gets the battery state-of-charge (SOC) as a percentage.
+ *
+ * @return SOC percentage on success, or -1.0f on error.
+ */
+float io_lowVoltageBattery_get_SOC(void)
+{
+    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
 
-    if (calculated_checksum != checksum)
-    {
-        return -1;
-    }
+    if (!send_subcommand(ACCUMULATED_CHARGE_COMMAND))
+        return -1.0f;
 
-    charge = (buffer[0] | (buffer[1] << 8) | (buffer[2] << 16));
-    time   = (buffer[3] | (buffer[4] << 8));
+    uint8_t buffer[SOC_RESPONSE_LENGTH];
+    if (!read_response(ACCUMULATED_CHARGE_COMMAND, SOC_RESPONSE_LENGTH, buffer))
+        return -1.0f;
 
+    /* Parse the 3-byte charge value (buffer[0]-buffer[2]) */
+    uint32_t charge = buffer[0] | (buffer[1] << BYTE_SHIFT) | (buffer[2] << (BYTE_SHIFT * 2));
     float CC_GAIN    = ADC_CALIBRATION_FACTOR / R_SENSE;
     float charge_mAh = (charge * CC_GAIN) / SECONDS_PER_HOUR;
 
-    hw_i2c_memWrite(&hi2c1, ALARM_STATUS_REG, ALARM_CLEAR_CMD); // Clear ALERT
+    /* Clear any pending alert */
+    uint8_t alarmClear = ALARM_CLEAR_CMD;
+    hw_i2c_memWrite(&lvBatMon, ALARM_STATUS_REG, &alarmClear, RESPONSE_LENGTH_SIZE);
 
     return (charge_mAh / Q_FULL) * PERCENTAGE_FACTOR;
 }
 
 /**
- * Helper function to read the coltage of the LV battery from BQ76922
- * 
- * @return the voltage as a float
+ * @brief Gets the battery voltage.
+ *
+ * @param voltage_cmd The subcommand used to read the voltage.
+ *
+ * @return The battery voltage on success, or -1 on error.
  */
-uint16_t io_lowVoltageBattery_readVoltage(uint16_t volt_cmd)
+uint16_t io_lowVoltageBattery_get_voltage(uint16_t voltage_cmd)
 {
-    uint16_t voltage;
+    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
 
-    uint8_t responseLen = io_lowVoltageBattery_readResponseLength();
+    if (!send_subcommand(voltage_cmd))
+        return (uint16_t)-1;
 
-    if (responseLen != 2)
-    {
-        return -1;
-    }
+    uint8_t buffer[VOLTAGE_RESPONSE_LENGTH];
+    if (!read_response(voltage_cmd, VOLTAGE_RESPONSE_LENGTH, buffer))
+        return (uint16_t)-1;
 
-    uint8_t buffer[2];
-
-    if (!hw_i2c_memRead(&hi2c1, REG_DATA_BUFFER, buffer, 2))
-    {
-        return -1;
-    }
-
-    uint8_t checksum;
-    if (!hw_i2c_memRead(&hi2c1, REG_CHECKSUM, &checksum, 1))
-    {
-        return -1;
-    }
-
-    uint8_t calculated_checksum = (volt_cmd & 0xFF) + (volt_cmd >> 8) + responseLen;
-    for (int i = 0; i < responseLen; i++)
-    {
-        calculated_checksum += buffer[i];
-    }
-    calculated_checksum = ~calculated_checksum; // Invert bits
-
-    if (calculated_checksum != checksum)
-    {
-        return -1;
-    }
-
-    voltage = (buffer[0] | (buffer[1] << 8);
-
+    uint16_t voltage = buffer[0] | (buffer[1] << BYTE_SHIFT);
     return voltage;
-}
-
-/**
- * Initialization function to define semaphore
- * 
- * @return true if the semaphore was sucessfully created and false otherwise
- */
-bool io_lowVoltageBattery_init()
-{
-    bat_mtr_sem = osSemaphoreNew(1, 0, NULL); 
-
-    if (bat_mtr_sem == NULL) {
-        return false;
-    }
-
-    uint8_t alert_config = hw_i2c_memRead(&hi2c1, ALERT_PIN_CONFIG); // Read the existing ALERT pin config
-
-    // Set OPT[5] (the 5th bit) = 1 (Active Low) while preserving other settings
-    alert_config |= (1 << 5);  // Set bit 5
-
-    hw_i2c_memWrite(&hi2c1, ALERT_PIN_CONFIG, alert_config); // Write back the updated configuration
-
-    hw_i2c_memWrite(&hi2c1, ALERT_PIN_CONFIG, 0x02); // Configure ALERT pin as an interrupt output
-
-    hw_i2c_memWrite(&hi2c1, ALARM_ENABLE_REG, 0x82); // Enable ADC scan alerts
-
-    /**
-     * Note: OTP can be configured to reduce processing bandwidth at init time
-     */
-    return true;
-}
-
-/**
- * Main driver function to execute i2c communication protocol to get the state-of-charge (SOC)
- * 
- * @return the SOC as a percentage of full charge
- */
-float io_lowVoltageBattery_getSOC()
-{
-    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
-
-    if (!io_lowVoltageBattery_writeSubcommand(CMD_DASTATUS6))
-    {
-        return -1;
-    }
-
-    return io_lowVoltageBattery_readSOC();
-}
-
-/**
- * Main driver function to execute i2c communication protocol to get the battery voltage
- * 
- * @return the voltage
- */
-uint16_t io_lowVoltageBattery_getVoltage(uint16_t voltage_cmd)
-{
-    osSemaphoreAcquire(bat_mtr_sem, osWaitForever);
-
-    if (!io_lowVoltageBattery_writeSubcommand(voltage_cmd))
-    {
-        return -1;
-    }
-
-    return io_lowVoltageBattery_readVoltage(voltage_cmd);
 }
